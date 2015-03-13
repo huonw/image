@@ -1,0 +1,1 @@
+initSidebarItems({"trait":[["Num","Num trait from old stdlib"],["One","One trait from old stdlib, added max_value"],["Primitive","Primitive trait from old stdlib, added max_value"],["Zero","Zero trait from old stdlib"]]});
