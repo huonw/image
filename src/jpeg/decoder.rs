@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use byteorder::{ReadBytesExt, BigEndian};
 use num::range_step;
 
+use simd::i16x8;
+
 use color;
 use super::transform;
 
@@ -210,52 +212,58 @@ impl<R: Read>JPEGDecoder<R> {
 
     fn decode_block(&mut self, i: usize, dc: u8, pred: i32, ac: u8, q: u8) -> ImageResult<i32> {
         let zz   = &mut self.mcu[i * 64..i * 64 + 64];
-        let mut tmp = [0i32; 64];
+        let mut tmp = [i16x8::splat(0); 64 / 8];
 
-        let dctable = &self.dctables[dc as usize];
-        let actable = &self.actables[ac as usize];
-        let qtable  = &self.qtables[64 * q as usize..64 * q as usize + 64];
+        let dc_;
+        {
+            let tmp = unsafe {&mut *(tmp.as_mut_ptr() as *mut [i16; 64])};
 
-        let t     = try!(self.h.decode_symbol(&mut self.r, dctable));
+            let dctable = &self.dctables[dc as usize];
+            let actable = &self.actables[ac as usize];
+            let qtable  = &self.qtables[64 * q as usize..64 * q as usize + 64];
 
-        let diff  = if t > 0 {
-            try!(self.h.receive(&mut self.r, t))
-        } else {
-            0
-        };
+            let t     = try!(self.h.decode_symbol(&mut self.r, dctable));
 
-        // Section F.2.1.3.1
-        let diff = extend(diff, t);
-        let dc = diff + pred;
-        tmp[0] = dc * qtable[0] as i32;
-
-        let mut k = 1usize;
-        while k < 64 {
-            let rs = try!(self.h.decode_symbol(&mut self.r, actable));
-
-            let ssss = rs & 0x0F;
-            let rrrr = rs >> 4;
-
-            if ssss == 0 {
-                if rrrr != 15 {
-                    break
-                }
-
-                k += 16;
+            let diff  = if t > 0 {
+                try!(self.h.receive(&mut self.r, t))
             } else {
-                k += rrrr as usize;
+                0
+            };
 
-                // Figure F.14
-                let t = try!(self.h.receive(&mut self.r, ssss));
+            // Section F.2.1.3.1
+            let diff = extend(diff, t);
+            let dc = diff + pred;
+            tmp[0] = dc as i16;
+            dc_ = dc;
 
-                tmp[UNZIGZAG[k] as usize] = extend(t, ssss) * qtable[k] as i32;
-                k += 1;
+            let mut k = 1usize;
+            while k < 64 {
+                let rs = try!(self.h.decode_symbol(&mut self.r, actable));
+
+                let ssss = rs & 0x0F;
+                let rrrr = rs >> 4;
+
+                if ssss == 0 {
+                    if rrrr != 15 {
+                        break
+                    }
+
+                    k += 16;
+                } else {
+                    k += rrrr as usize;
+
+                    // Figure F.14
+                    let t = try!(self.h.receive(&mut self.r, ssss));
+
+                    tmp[UNZIGZAG[k] as usize] = extend(t, ssss) as i16 * qtable[k] as i16;
+                    k += 1;
+                }
             }
         }
 
         transform::idct(&tmp, zz);
 
-        Ok(dc)
+        Ok(dc_)
     }
 
     fn read_metadata(&mut self) -> ImageResult<()> {

@@ -14,6 +14,8 @@ extern crate enum_primitive;
 #[cfg(test)]
 extern crate test;
 
+extern crate simd;
+
 pub use color::ColorType::{
     self,
     Gray,

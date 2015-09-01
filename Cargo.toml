@@ -21,11 +21,15 @@ exclude = [
 name = "image"
 path = "./src/lib.rs"
 
+[profile.release]
+# debug-assertions = true
+
 [dependencies]
 byteorder = "0.3.10"
 num = "0.1.25"
 enum_primitive = "0.0.1"
 glob = "0.2.10"
+simd = { git = "file:///home/huon/projects/simd/simd2" }
 
 [dependencies.gif]
 version = "0.5"

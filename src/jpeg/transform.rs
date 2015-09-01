@@ -1,3 +1,5 @@
+use simd::i16x8;
+
 // The forward dct's output coefficients are scaled by 8
 // The inverse dct's output samples are clamped to the range [0, 255]
 fn level_shift_up(a: i32) -> u8 {
@@ -204,14 +206,15 @@ pub fn fdct(samples: &[u8], coeffs: &mut [i32]) {
     }
 }
 
-pub fn idct(coeffs: &[i32], samples: &mut [u8]) {
+pub fn idct(coeffs: &[i16x8; 8], samples: &mut [u8]) {
+    let coeffs = unsafe {&*(coeffs.as_ptr() as *const [i16; 64])};
     let mut tmp = [0i32; 64];
 
     for x in (0usize..8).rev() {
         if coeffs[x + 8 * 1] == 0 && coeffs[x + 8 * 2] == 0 && coeffs[x + 8 * 3] == 0 &&
             coeffs[x + 8 * 4] == 0 && coeffs[x + 8 * 5] == 0 && coeffs[x + 8 * 6] == 0 &&
             coeffs[x + 8 * 7] == 0 {
-            let dcval = coeffs[x + 8 * 0] << PASS1_BITS as usize;
+            let dcval = (coeffs[x + 8 * 0] as i32) << PASS1_BITS as usize;
 
             tmp[x + 8 * 0] = dcval;
             tmp[x + 8 * 1] = dcval;
@@ -229,50 +232,68 @@ pub fn idct(coeffs: &[i32], samples: &mut [u8]) {
         let z2 = coeffs[x + 8 * 2];
         let z3 = coeffs[x + 8 * 6];
 
-        let z1 = (z2 + z3) * FIX_0_541196100;
-        let t2 = z1 + z2 * FIX_0_765366865;
-        let t3 = z1 - z3 * FIX_1_847759065;
+        /*
+        let z1 = (z2 as i32 + z3 as i32) * FIX_0_541196100;
+        let t2 = z1 + z2 as i32 * FIX_0_765366865;
+        let t3 = z1 - z3 as i32 * FIX_1_847759065;
+        */
+        let t2 = z2 as i32 * (FIX_0_765366865 + FIX_0_541196100) + z3 as i32 * FIX_0_541196100;
+        let t3 = z2 as i32 * FIX_0_541196100 + z3 as i32 * (FIX_0_541196100 - FIX_1_847759065);
 
-        let mut z2 = coeffs[x + 8 * 0];
-        let mut z3 = coeffs[x + 8 * 4];
+        let mut z2 = coeffs[x + 8 * 0] as i32;
+        let mut z3 = coeffs[x + 8 * 4] as i32;
         z2 <<= CONST_BITS as usize;
         z3 <<= CONST_BITS as usize;
 
         z2 += 1 << (CONST_BITS - PASS1_BITS - 1) as usize;
 
-        let t0 = z2 + z3;
-        let t1 = z2 - z3;
+        let t0 = z2 as i32 + z3 as i32;
+        let t1 = z2 as i32 - z3 as i32;
 
         let t10 = t0 + t2;
         let t13 = t0 - t2;
         let t11 = t1 + t3;
         let t12 = t1 - t3;
 
-        let t0 = coeffs[x + 8 * 7];
-        let t1 = coeffs[x + 8 * 5];
-        let t2 = coeffs[x + 8 * 3];
-        let t3 = coeffs[x + 8 * 1];
+        let t0 = coeffs[x + 8 * 7] as i32;
+        let t1 = coeffs[x + 8 * 5] as i32;
+        let t2 = coeffs[x + 8 * 3] as i32;
+        let t3 = coeffs[x + 8 * 1] as i32;
 
         let z2 = t0 + t2;
         let z3 = t1 + t3;
 
-        let z1 = (z2 + z3) * FIX_1_175875602;
-        let mut z2 = z2 * (-FIX_1_961570560);
-        let mut z3 = z3 * (-FIX_0_390180644);
+        /*
+        let z1 = (z2 as i32 + z3 as i32) * FIX_1_175875602;
+        let mut z2 = z2 as i32 * (-FIX_1_961570560);
+        let mut z3 = z3 as i32 * (-FIX_0_390180644);
         z2 += z1;
         z3 += z1;
+        */
+        let z2_ = z2 as i32 * (FIX_1_175875602 - FIX_1_961570560) + z3 as i32 * FIX_1_175875602;
+        let z3 = z2 as i32 * FIX_1_175875602 + z3 as i32 * (FIX_1_175875602 - FIX_0_390180644);
+        let z2 = z2_;
 
-        let z1 = (t0 + t3) * (-FIX_0_899976223);
-        let mut t0 = t0 * FIX_0_298631336;
-        let mut t3 = t3 * FIX_1_501321110;
+        /*
+        let z1 = (t0 as i32 + t3 as i32) * (-FIX_0_899976223);
+        let mut t0 = t0 as i32 * FIX_0_298631336;
+        let mut t3 = t3 as i32 * FIX_1_501321110;
         t0 += z1 + z2;
         t3 += z1 + z3;
-
-        let z1 = (t1 + t2) * (-FIX_2_562915447);
-        let mut t1 = t1 * FIX_2_053119869;
-        let mut t2 = t2 * FIX_3_072711026;
-        t1 += z1 + z3;
-        t2 += z1 + z2;
+        */
+        let t0_ = t0 as i32 * (-FIX_0_899976223 + FIX_0_298631336) + t3 as i32 * (-FIX_0_899976223) + z2 as i32;
+        let t3 = t0 as i32 * (-FIX_0_899976223) + t3 as i32 * (-FIX_0_899976223 + FIX_1_501321110) + z3 as i32;
+        let t0 = t0_;
+        /*
+        let z1 = (t1 as i32 + t2 as i32) * (-FIX_2_562915447);
+        let mut t1 = t1 as i32 * FIX_2_053119869;
+        let mut t2 = t2 as i32 * FIX_3_072711026;
+        t1 += z1 + z3 as i32;
+        t2 += z1 + z2 as i32;
+         */
+        let t1_ = t1 as i32 * (-FIX_2_562915447 + FIX_2_053119869) + t2 as i32 * (-FIX_2_562915447) + z3 as i32;
+        let t2 = t1 as i32 * (-FIX_2_562915447) + t2 as i32 * (-FIX_2_562915447 + FIX_3_072711026) + z2 as i32;
+        let t1 = t1_;
 
         tmp[x + 8 * 0] = (t10 + t3) >> (CONST_BITS - PASS1_BITS) as usize;
         tmp[x + 8 * 7] = (t10 - t3) >> (CONST_BITS - PASS1_BITS) as usize;
@@ -290,12 +311,16 @@ pub fn idct(coeffs: &[i32], samples: &mut [u8]) {
         let z2 = tmp[y0 + 2];
         let z3 = tmp[y0 + 6];
 
-        let z1 = (z2 + z3) * FIX_0_541196100;
-        let t2 = z1 + z2 * FIX_0_765366865;
-        let t3 = z1 - z3 * FIX_1_847759065;
+        /*
+        let z1 = (z2 as i32 + z3 as i32) * FIX_0_541196100;
+        let t2 = z1 + z2 as i32 * FIX_0_765366865;
+        let t3 = z1 - z3 as i32 * FIX_1_847759065;
+         */
+        let t2 = z2 as i32 * (FIX_0_541196100 + FIX_0_765366865) + z3 as i32 * FIX_0_541196100;
+        let t3 = z2 as i32 * (FIX_0_541196100) + z3 as i32 * (FIX_0_541196100 - FIX_1_847759065);
 
-        let z2 = tmp[y0 + 0] + (1 << (PASS1_BITS + 2) as usize);
-        let z3 = tmp[y0 + 4];
+        let z2 = tmp[y0 + 0] as i32 + (1 << (PASS1_BITS + 2) as usize);
+        let z3 = tmp[y0 + 4] as i32;
 
         let t0 = (z2 + z3) << CONST_BITS as usize;
         let t1 = (z2 - z3) << CONST_BITS as usize;
@@ -313,23 +338,36 @@ pub fn idct(coeffs: &[i32], samples: &mut [u8]) {
         let z2 = t0 + t2;
         let z3 = t1 + t3;
 
-        let z1 = (z2 + z3) * FIX_1_175875602;
-        let mut z2 = z2 * (-FIX_1_961570560);
-        let mut z3 = z3 * (-FIX_0_390180644);
+        /*
+        let z1 = (z2 as i32 + z3 as i32) * FIX_1_175875602;
+        let mut z2 = z2 as i32 * (-FIX_1_961570560);
+        let mut z3 = z3 as i32 * (-FIX_0_390180644);
         z2 += z1;
         z3 += z1;
-
-        let z1 = (t0 + t3) * (-FIX_0_899976223);
-        let mut t0 = t0 * FIX_0_298631336;
-        let mut t3 = t3 * FIX_1_501321110;
-        t0 += z1 + z2;
-        t3 += z1 + z3;
-
-        let z1 = (t1 + t2) * (-FIX_2_562915447);
-        let mut t1 = t1 * FIX_2_053119869;
-        let mut t2 = t2 * FIX_3_072711026;
-        t1 += z1 + z3;
-        t2 += z1 + z2;
+        */
+        let z2_ = z2 as i32 * (FIX_1_175875602 - FIX_1_961570560) + z3 as i32 * FIX_1_175875602;
+        let z3 = z2 as i32 * FIX_1_175875602 + z3 as i32 * (FIX_1_175875602 - FIX_0_390180644);
+        let z2 = z2_;
+        /*
+        let z1 = (t0 as i32 + t3 as i32) * (-FIX_0_899976223);
+        let mut t0 = t0 as i32 * FIX_0_298631336;
+        let mut t3 = t3 as i32 * FIX_1_501321110;
+        t0 += z1 + z2 as i32;
+        t3 += z1 + z3 as i32;
+        */
+        let t0_ = t0 as i32 * (-FIX_0_899976223 + FIX_0_298631336) + t3 as i32 * (-FIX_0_899976223) + z2;
+        let t3 = t0 as i32 * (-FIX_0_899976223) + t3 as i32 * (-FIX_0_899976223 + FIX_1_501321110) + z3;
+        let t0 = t0_;
+        /*
+        let z1 = (t1 as i32 + t2 as i32) * (-FIX_2_562915447);
+        let mut t1 = t1 as i32 * FIX_2_053119869;
+        let mut t2 = t2 as i32 * FIX_3_072711026;
+        t1 += z1 + z3 as i32;
+        t2 += z1 + z2 as i32;
+         */
+        let t1_ = t1 as i32 * (-FIX_2_562915447 + FIX_2_053119869) + t2 as i32 * (-FIX_2_562915447) + z3;
+        let t2 = t1 as i32 * (-FIX_2_562915447) + t2 as i32 * (-FIX_2_562915447 + FIX_3_072711026) + z2;
+        let t1 = t1_;
 
         let a = (t10 + t3) >> (CONST_BITS + PASS1_BITS + 3) as usize;
         samples[y0 + 0] = level_shift_up(a);
