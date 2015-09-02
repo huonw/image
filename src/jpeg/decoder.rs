@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use byteorder::{ReadBytesExt, BigEndian};
 use num::range_step;
 
-use simd::i16x8;
+use simd::{i16x8, u8x16};
 
 use color;
 use super::transform;
@@ -618,8 +618,8 @@ impl<R: Read> ImageDecoder for JPEGDecoder<R> {
         Ok(image::DecodingResult::U8(buf))
     }
 }
-
-fn upsample_mcu(out: &mut [u8], xoffset: usize, width: usize, bpp: usize, mcu: &[u8], h: u8, v: u8) {
+#[allow(dead_code)]
+fn upsample_mcu_scalar(out: &mut [u8], xoffset: usize, width: usize, bpp: usize, mcu: &[u8], h: u8, v: u8) {
     if mcu.len() == 64 {
         for y in (0usize..8) {
             for x in (0usize..8) {
@@ -644,7 +644,7 @@ fn upsample_mcu(out: &mut [u8], xoffset: usize, width: usize, bpp: usize, mcu: &
                 for y in (0usize..8) {
                     for x in (0usize..8) {
                         let (a, b, c) = (y_blocks[k * 64 + x + y * 8], cb[x + y * 8], cr[x + y * 8]);
-                        let (r, g, b) = ycbcr_to_rgb(a , b , c );
+                        let (r, g, b) = ycbcr_to_rgb_scalar(a , b , c );
 
                         let offset = (y0 + y) * (width * bpp) + x0 + x * bpp;
                         out[offset + 0] = r;
@@ -659,7 +659,8 @@ fn upsample_mcu(out: &mut [u8], xoffset: usize, width: usize, bpp: usize, mcu: &
     }
 }
 
-fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
+#[allow(dead_code)]
+fn ycbcr_to_rgb_scalar(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
     let y = y as f32;
     let cr = cr as f32;
     let cb = cb as f32;
@@ -673,6 +674,117 @@ fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
     let b = clamp(b1 as i32, 0, 255) as u8;
 
     (r, g, b)
+}
+
+fn upsample_mcu(out: &mut [u8], xoffset: usize, width: usize, bpp: usize, mcu: &[u8], h: u8, v: u8) {
+    if mcu.len() == 64 {
+        for y in (0usize..8) {
+            for x in (0usize..8) {
+                out[xoffset + x + (y * width)] = mcu[x + y * 8]
+            }
+        }
+    } else {
+        let y_blocks = h * v;
+
+        let y_blocks = &mcu[..y_blocks as usize * 64];
+        let cb = &mcu[y_blocks.len()..y_blocks.len() + 64];
+        let cr = &mcu[y_blocks.len() + cb.len()..];
+
+        let mut k = 0;
+
+        for by in (0..v as usize) {
+            let y0 = by * 8;
+
+            for bx in (0..h as usize) {
+                let x0 = xoffset + bx * 8 * bpp;
+
+                let mut y = 0;
+                while y < 8 {
+                    let a = u8x16::load(y_blocks, k * 64 + y * 8);
+                    let b = u8x16::load(cb, y * 8);
+                    let c = u8x16::load(cr, y * 8);
+                    let (r, g, b) = ycbcr_to_rgb(a , b , c );
+
+                    let mut rr = [0; 16];
+                    r.store(&mut rr, 0);
+                    let mut gg = [0; 16];
+                    g.store(&mut gg, 0);
+                    let mut bb = [0; 16];
+                    b.store(&mut bb, 0);
+                    let mut offset = (y0 + y) * (width * bpp) + x0;
+                    for i in 0..8 {
+                        let (r1, g1, b1) = (rr[i], gg[i], bb[i]);
+                        let (r2, g2, b2) = (rr[i + 8], gg[i + 8], bb[i + 8]);
+                        out[offset + 0] = r1;
+                        out[offset + 1] = g1;
+                        out[offset + 2] = b1;
+                        out[offset + width * bpp + 0] = r2;
+                        out[offset + width * bpp + 1] = g2;
+                        out[offset + width * bpp + 2] = b2;
+
+                        offset += bpp;
+                    }
+
+                    y += 2;
+                }
+
+                k += 1;
+            }
+        }
+    }
+}
+
+fn ycbcr_to_rgb(y: u8x16, cb: u8x16, cr: u8x16) -> (u8x16, u8x16, u8x16) {
+    use simd::{f32x4, i32x4};
+    use simd::x86::sse2::*;
+
+    fn to_f32(a: u8x16) -> (f32x4, f32x4, f32x4, f32x4) {
+        let a1 = u8x16::new(a.extract(0), 0, 0, 0,
+                            a.extract(1), 0, 0, 0,
+                            a.extract(2), 0, 0, 0,
+                            a.extract(3), 0, 0, 0);
+        let a2 = u8x16::new(a.extract(4 + 0), 0, 0, 0,
+                            a.extract(4 + 1), 0, 0, 0,
+                            a.extract(4 + 2), 0, 0, 0,
+                            a.extract(4 + 3), 0, 0, 0);
+        let a3 = u8x16::new(a.extract(8 + 0), 0, 0, 0,
+                            a.extract(8 + 1), 0, 0, 0,
+                            a.extract(8 + 2), 0, 0, 0,
+                            a.extract(8 + 3), 0, 0, 0);
+        let a4 = u8x16::new(a.extract(12 + 0), 0, 0, 0,
+                            a.extract(12 + 1), 0, 0, 0,
+                            a.extract(12 + 2), 0, 0, 0,
+                            a.extract(12 + 3), 0, 0, 0);
+
+        fn c(a: u8x16) -> f32x4 {
+            unsafe {::std::mem::transmute::<_, i32x4>(a)}.to_f32()
+        }
+
+        (c(a1), c(a2), c(a3), c(a4))
+    }
+    let (y1, y2, y3, y4) = to_f32(y);
+    let (cr1, cr2, cr3, cr4) = to_f32(cr);
+    let (cb1, cb2, cb3, cb4) = to_f32(cb);
+
+    let _128 = f32x4::splat(128.0);
+    let r1 = y1 + f32x4::splat(1.402f32) * (cr1 - _128) ;
+    let r2 = y2 + f32x4::splat(1.402f32) * (cr2 - _128) ;
+    let g1 = y1 - f32x4::splat(0.34414f32) * (cb1 - _128) - f32x4::splat(0.71414f32) * (cr1 - _128);
+    let g2 = y2 - f32x4::splat(0.34414f32) * (cb2 - _128) - f32x4::splat(0.71414f32) * (cr2 - _128);
+    let b1 = y1 + f32x4::splat(1.772f32) * (cb1 - _128);
+    let b2 = y2 + f32x4::splat(1.772f32) * (cb2 - _128);
+
+    let r3 = y3 + f32x4::splat(1.402f32) * (cr3 - _128) ;
+    let r4 = y4 + f32x4::splat(1.402f32) * (cr4 - _128) ;
+    let g3 = y3 - f32x4::splat(0.34414f32) * (cb3 - _128) - f32x4::splat(0.71414f32) * (cr3 - _128);
+    let g4 = y4 - f32x4::splat(0.34414f32) * (cb4 - _128) - f32x4::splat(0.71414f32) * (cr4 - _128);
+    let b3 = y3 + f32x4::splat(1.772f32) * (cb3 - _128);
+    let b4 = y4 + f32x4::splat(1.772f32) * (cb4 - _128);
+
+    (r1.to_i32().packs(r2.to_i32()).packus(r3.to_i32().packs(r4.to_i32())),
+     g1.to_i32().packs(g2.to_i32()).packus(g3.to_i32().packs(g4.to_i32())),
+     b1.to_i32().packs(b2.to_i32()).packus(b3.to_i32().packs(b4.to_i32())))
+
 }
 
 // Section F.2.2.1
