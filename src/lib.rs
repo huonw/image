@@ -7,6 +7,8 @@
 #![deny(missing_copy_implementations)]
 #![cfg_attr(test, feature(test))]
 
+#![feature(cfg_target_feature)]
+
 extern crate byteorder;
 extern crate num;
 #[macro_use]
